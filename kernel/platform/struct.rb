@@ -285,6 +285,24 @@ module FFI
       members.map { |m| self[m] }
     end
 
+    def self.by_value
+      StructByValue.new(self)
+    end
+
+    def self.in
+      self
+    end
+
+    def self.out
+      self
+    end
+  end
+
+  class StructByValue
+    attr_reader :wrapped_class
+    def initialize(wrapped_class)
+      @wrapped_class = wrapped_class
+    end
   end
 end
 

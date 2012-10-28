@@ -19,6 +19,8 @@ namespace rubinius {
     Symbol* file_;         // slot
     Fixnum* required_;     // slot
 
+    void convert_layout_element_to_arg_info(STATE, Object *type, FFIArgInfo *outArg);
+    ffi_type* convert_arg(STATE, FFIArgInfo *arg);
   public:
     FFIData* ffi_data;
 
@@ -62,6 +64,7 @@ namespace rubinius {
   struct FFIArgInfo {
     int type;
     Object* enum_obj;
+    Object* struct_type_obj;
     NativeFunction* callback;
   };
 
