@@ -31,6 +31,7 @@
 #include "builtin/system.hpp"
 #include "builtin/location.hpp"
 #include "builtin/nativemethod.hpp"
+#include "builtin/lookuptable.hpp"
 
 #include "ontology.hpp"
 
@@ -171,6 +172,118 @@ namespace rubinius {
     return nf;
   }
 
+  void NativeFunction::convert_layout_element_to_arg_info(STATE, Object *type, FFIArgInfo *outArg){
+    NativeFunction* cb = 0;
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+    if(type->fixnum_p()) {
+      outArg->type = as<Integer>(type)->to_native();
+      outArg->enum_obj = NULL;
+      outArg->struct_type_obj = NULL;
+      outArg->callback = NULL;
+    } else if(CBOOL(type->respond_to(state,state->symbol("wrapped_class"), cTrue))) {
+      outArg->type = RBX_FFI_TYPE_STRUCT_VALUE;
+      outArg->struct_type_obj = type->send(state, env->current_call_frame(), state->symbol("wrapped_class"));
+      outArg->enum_obj = NULL;
+      outArg->callback = NULL;
+    } else if(CBOOL(type->respond_to(state, state->symbol("layout"), cTrue))) {
+      outArg->type = RBX_FFI_TYPE_STRUCT;
+      outArg->struct_type_obj = type;
+      outArg->enum_obj = NULL;
+      outArg->callback = NULL;
+    } else if((cb = try_as<NativeFunction>(type))) {
+      outArg->type = RBX_FFI_TYPE_CALLBACK;
+      outArg->enum_obj = NULL;
+      outArg->struct_type_obj = NULL;
+      outArg->callback = cb;
+    } else if(CBOOL(type->respond_to(state, state->symbol("[]"), cTrue))) {
+      outArg->type = RBX_FFI_TYPE_ENUM;
+      outArg->enum_obj = type;
+      outArg->callback = NULL;
+      outArg->struct_type_obj = NULL;
+    } else {
+      //panic
+    }
+  }
+
+  ffi_type* NativeFunction::convert_arg(STATE, FFIArgInfo *arg){
+    ffi_type* result = NULL;    
+    switch(arg->type){
+      case RBX_FFI_TYPE_CHAR:
+        result = &ffi_type_schar;
+        break;
+      case RBX_FFI_TYPE_UCHAR:
+      case RBX_FFI_TYPE_BOOL:
+        result = &ffi_type_uchar;
+        break;
+      case RBX_FFI_TYPE_SHORT:
+        result = &ffi_type_sshort;
+        break;
+      case RBX_FFI_TYPE_USHORT:
+        result = &ffi_type_ushort;
+        break;
+      case RBX_FFI_TYPE_INT:
+      case RBX_FFI_TYPE_ENUM:
+        result = &ffi_type_sint;
+        break;
+      case RBX_FFI_TYPE_UINT:
+        result = &ffi_type_uint;
+        break;
+      case RBX_FFI_TYPE_LONG:
+        result = &ffi_type_slong;
+        break;
+      case RBX_FFI_TYPE_ULONG:
+        result = &ffi_type_ulong;
+        break;
+      case RBX_FFI_TYPE_FLOAT:
+        result = &ffi_type_float;
+        break;
+      case RBX_FFI_TYPE_DOUBLE:
+        result = &ffi_type_double;
+        break;
+      case RBX_FFI_TYPE_LONG_LONG:
+        result = &ffi_type_sint64;
+        break;
+      case RBX_FFI_TYPE_ULONG_LONG:
+        result = &ffi_type_uint64;
+        break;
+      case RBX_FFI_TYPE_STRUCT_VALUE: {
+        NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+        LookupTable *table = try_as<LookupTable>(arg->struct_type_obj->send(state, env->current_call_frame(), state->symbol("layout")));
+        Array *orderedKeys = try_as<Array>(arg->struct_type_obj->send(state, env->current_call_frame(), state->symbol("members")));
+
+        ffi_type *struct_descriptor = ALLOC_N(ffi_type, 1);
+      
+        struct_descriptor->size = 0;
+        struct_descriptor->alignment = 0;
+        struct_descriptor->type = FFI_TYPE_STRUCT;
+        struct_descriptor->elements = ALLOC_N(ffi_type*, orderedKeys->size() + 1);
+
+        for(size_t index=0; index < orderedKeys->size(); index++){
+          Object *key = orderedKeys->get(state, index);
+          Array *pair = (Array*)table->aref(state, key);
+          Object *type = pair->get(state, 1);
+          FFIArgInfo stub;
+
+          convert_layout_element_to_arg_info(state, type, &stub);
+          struct_descriptor->elements[index] = convert_arg(state, &stub);
+        } 
+        struct_descriptor->elements[orderedKeys->size()] = NULL;
+        result = struct_descriptor;
+        break;
+      }
+      case RBX_FFI_TYPE_STRUCT:
+      case RBX_FFI_TYPE_OBJECT:
+      case RBX_FFI_TYPE_PTR:
+      case RBX_FFI_TYPE_CALLBACK:
+      case RBX_FFI_TYPE_STRING:
+      case RBX_FFI_TYPE_STATE:
+        result = &ffi_type_pointer;
+        break;
+      
+    }
+    return result;
+  }
+
   void NativeFunction::prep(STATE, int arg_count, FFIArgInfo* args,
                             FFIArgInfo* ret) {
 
@@ -182,53 +295,7 @@ namespace rubinius {
     types = ALLOC_N(ffi_type*, arg_count);
 
     for(i = 0; i < arg_count; i++) {
-      switch(args[i].type) {
-      case RBX_FFI_TYPE_CHAR:
-        types[i] = &ffi_type_schar;
-        break;
-      case RBX_FFI_TYPE_UCHAR:
-      case RBX_FFI_TYPE_BOOL:
-        types[i] = &ffi_type_uchar;
-        break;
-      case RBX_FFI_TYPE_SHORT:
-        types[i] = &ffi_type_sshort;
-        break;
-      case RBX_FFI_TYPE_USHORT:
-        types[i] = &ffi_type_ushort;
-        break;
-      case RBX_FFI_TYPE_INT:
-      case RBX_FFI_TYPE_ENUM:
-        types[i] = &ffi_type_sint;
-        break;
-      case RBX_FFI_TYPE_UINT:
-        types[i] = &ffi_type_uint;
-        break;
-      case RBX_FFI_TYPE_LONG:
-        types[i] = &ffi_type_slong;
-        break;
-      case RBX_FFI_TYPE_ULONG:
-        types[i] = &ffi_type_ulong;
-        break;
-      case RBX_FFI_TYPE_FLOAT:
-        types[i] = &ffi_type_float;
-        break;
-      case RBX_FFI_TYPE_DOUBLE:
-        types[i] = &ffi_type_double;
-        break;
-      case RBX_FFI_TYPE_LONG_LONG:
-        types[i] = &ffi_type_sint64;
-        break;
-      case RBX_FFI_TYPE_ULONG_LONG:
-        types[i] = &ffi_type_uint64;
-        break;
-      case RBX_FFI_TYPE_OBJECT:
-      case RBX_FFI_TYPE_PTR:
-      case RBX_FFI_TYPE_CALLBACK:
-      case RBX_FFI_TYPE_STRING:
-      case RBX_FFI_TYPE_STATE:
-        types[i] = &ffi_type_pointer;
-        break;
-      }
+      types[i] = convert_arg(state, &args[i]);
     }
 
     switch(ret->type) {
@@ -270,6 +337,10 @@ namespace rubinius {
     case RBX_FFI_TYPE_ULONG_LONG:
       rtype = &ffi_type_uint64;
       break;
+    case RBX_FFI_TYPE_STRUCT_VALUE:
+      rtype = convert_arg(state,ret);
+      break;
+    case RBX_FFI_TYPE_STRUCT:
     case RBX_FFI_TYPE_OBJECT:
     case RBX_FFI_TYPE_PTR:
     case RBX_FFI_TYPE_CALLBACK:
@@ -324,7 +395,9 @@ namespace rubinius {
         if(type->fixnum_p()) {
           args_info[i].type = as<Integer>(type)->to_native();
           args_info[i].enum_obj = NULL;
+          args_info[i].struct_type_obj = NULL;
           args_info[i].callback = NULL;
+        
 
           /* State can only be passed as the first arg, and it's invisible,
              ie doesn't get seen as in onbound arg by ruby. But it can ONLY
@@ -337,13 +410,26 @@ namespace rubinius {
               return (NativeFunction*)Primitives::failure();
             }
           }
+        } else if(CBOOL(type->respond_to(state,state->symbol("wrapped_class"), cTrue))) {
+          NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+          args_info[i].type = RBX_FFI_TYPE_STRUCT_VALUE;
+          args_info[i].struct_type_obj = type->send(state, env->current_call_frame(), state->symbol("wrapped_class"));
+          args_info[i].enum_obj = NULL;
+          args_info[i].callback = NULL;
+        } else if(CBOOL(type->respond_to(state, state->symbol("layout"), cTrue))) {
+          args_info[i].type = RBX_FFI_TYPE_STRUCT;
+          args_info[i].struct_type_obj = type;
+          args_info[i].enum_obj = NULL;
+          args_info[i].callback = NULL;
         } else if((cb = try_as<NativeFunction>(type))) {
           args_info[i].type = RBX_FFI_TYPE_CALLBACK;
+          args_info[i].struct_type_obj = NULL;
           args_info[i].enum_obj = NULL;
           args_info[i].callback = cb;
         } else if(CBOOL(type->respond_to(state, state->symbol("[]"), cTrue))) {
           args_info[i].type = RBX_FFI_TYPE_ENUM;
           args_info[i].enum_obj = type;
+          args_info[i].struct_type_obj = NULL;
           args_info[i].callback = NULL;
         } else {
           XFREE(args_info);
@@ -357,14 +443,28 @@ namespace rubinius {
     if(ret->fixnum_p()) {
       ret_info.type = as<Integer>(ret)->to_native();
       ret_info.enum_obj = NULL;
+      ret_info.struct_type_obj = NULL;
+      ret_info.callback = NULL;
+    } else if(CBOOL(ret->respond_to(state,state->symbol("wrapped_class"), cTrue))) {
+      NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+      ret_info.type = RBX_FFI_TYPE_STRUCT_VALUE;
+      ret_info.struct_type_obj = ret->send(state, env->current_call_frame(), state->symbol("wrapped_class"));
+      ret_info.enum_obj = NULL;
+      ret_info.callback = NULL;
+    } else if(CBOOL(ret->respond_to(state, state->symbol("layout"), cTrue))) {
+      ret_info.type = RBX_FFI_TYPE_STRUCT;
+      ret_info.struct_type_obj = ret;
+      ret_info.enum_obj = NULL;
       ret_info.callback = NULL;
     } else if((cb = try_as<NativeFunction>(ret))) {
       ret_info.type = RBX_FFI_TYPE_CALLBACK;
       ret_info.enum_obj = NULL;
+      ret_info.struct_type_obj = NULL;
       ret_info.callback = cb;
     } else if(CBOOL(ret->respond_to(state, state->symbol("symbol"), cTrue))) {
       ret_info.type = RBX_FFI_TYPE_ENUM;
       ret_info.enum_obj = ret;
+      ret_info.struct_type_obj = ret;
       ret_info.callback = NULL;
     } else {
       XFREE(args_info);
@@ -432,6 +532,20 @@ namespace rubinius {
       case RBX_FFI_TYPE_LONG_LONG:
         args->set(state, i, Fixnum::from(*(long long*)parameters[i]));
         break;
+      case RBX_FFI_TYPE_STRUCT:{
+        void* ptr = *(void**)parameters[i];
+        Array* ary = Array::create(state, 1);
+        ary->set(state, 0, Pointer::create(state, ptr));
+        args->set(state, i, stub->args_info[i].struct_type_obj->send(state, env->current_call_frame(), state->symbol("new"), ary));
+        break;
+      }
+      case RBX_FFI_TYPE_STRUCT_VALUE:{
+        void* ptr = (void*)parameters[i];
+        Array* ary = Array::create(state, 1);
+        ary->set(state, 0, Pointer::create(state, ptr));
+        args->set(state, i, stub->args_info[i].struct_type_obj->send(state, env->current_call_frame(), state->symbol("new"), ary));
+        break;
+      }
       case RBX_FFI_TYPE_ULONG_LONG:
         args->set(state, i, Fixnum::from(*(unsigned long long*)parameters[i]));
         break;
@@ -583,6 +697,25 @@ namespace rubinius {
         *((void**)retval) = 0;
       }
       break;
+
+
+    case RBX_FFI_TYPE_STRUCT: {
+      Pointer* ptr = try_as<Pointer>(obj->send(state, env->current_call_frame(), state->symbol("to_ptr")));
+      if(ptr) {
+        *((void**)retval) = ptr->pointer;
+      } else {
+        *((void**)retval) = 0;
+      }
+      break;
+    }
+
+    case RBX_FFI_TYPE_STRUCT_VALUE:{
+      Pointer* ptr = try_as<Pointer>(obj->send(state, env->current_call_frame(), state->symbol("to_ptr")));
+      if(ptr){
+        memmove((void**)retval, ptr->pointer, cif->rtype->size); 
+      }
+      break;
+    }
     case RBX_FFI_TYPE_ENUM: {
       Array* ary = Array::create(state, 1);
       ary->set(state, 0, obj);
@@ -628,6 +761,7 @@ namespace rubinius {
         if(type->fixnum_p()) {
           args_info[i].type = as<Integer>(type)->to_native();
           args_info[i].enum_obj = NULL;
+          args_info[i].struct_type_obj = NULL;
           args_info[i].callback = NULL;
 
           /* State can not be passed. */
@@ -635,13 +769,26 @@ namespace rubinius {
             XFREE(args_info);
             return nil<Array>();
           }
+        } else if(CBOOL(type->respond_to(state,state->symbol("wrapped_class"), cTrue))) {
+          NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+          args_info[i].type = RBX_FFI_TYPE_STRUCT_VALUE;
+          args_info[i].struct_type_obj = type->send(state, env->current_call_frame(), state->symbol("wrapped_class"));
+          args_info[i].enum_obj = NULL;
+          args_info[i].callback = NULL;
+        } else if(CBOOL(type->respond_to(state, state->symbol("layout"), cTrue))) {
+          args_info[i].type = RBX_FFI_TYPE_STRUCT;
+          args_info[i].struct_type_obj = type;
+          args_info[i].enum_obj = NULL;
+          args_info[i].callback = NULL;
         } else if((cb = try_as<NativeFunction>(type))) {
           args_info[i].type = RBX_FFI_TYPE_CALLBACK;
           args_info[i].enum_obj = NULL;
+          args_info[i].struct_type_obj = NULL;
           args_info[i].callback = cb;
         } else if(CBOOL(type->respond_to(state, state->symbol("[]"), cTrue))) {
           args_info[i].type = RBX_FFI_TYPE_ENUM;
           args_info[i].enum_obj = type;
+          args_info[i].struct_type_obj = NULL;
           args_info[i].callback = NULL;
         } else {
           XFREE(args_info);
@@ -655,14 +802,29 @@ namespace rubinius {
     if(ret->fixnum_p()) {
       ret_info.type = as<Integer>(ret)->to_native();
       ret_info.enum_obj = NULL;
+      ret_info.struct_type_obj = NULL;
+      ret_info.callback = NULL;
+    }
+    else if(CBOOL(ret->respond_to(state,state->symbol("wrapped_class"), cTrue))) {
+      NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+      ret_info.type = RBX_FFI_TYPE_STRUCT_VALUE;
+      ret_info.struct_type_obj = ret->send(state, env->current_call_frame(), state->symbol("wrapped_class"));
+      ret_info.enum_obj = NULL;
+      ret_info.callback = NULL;
+    } else if(CBOOL(ret->respond_to(state, state->symbol("layout"), cTrue))) {
+      ret_info.type = RBX_FFI_TYPE_STRUCT;
+      ret_info.struct_type_obj = ret;
+      ret_info.enum_obj = NULL;
       ret_info.callback = NULL;
     } else if((cb = try_as<NativeFunction>(ret))) {
       ret_info.type = RBX_FFI_TYPE_CALLBACK;
       ret_info.enum_obj = NULL;
+      ret_info.struct_type_obj = NULL;
       ret_info.callback = cb;
     } else if(CBOOL(ret->respond_to(state, state->symbol("symbol"), cTrue))) {
       ret_info.type = RBX_FFI_TYPE_ENUM;
       ret_info.enum_obj = ret;
+      ret_info.struct_type_obj = NULL;
       ret_info.callback = NULL;
     } else {
       XFREE(args_info);
@@ -962,6 +1124,44 @@ namespace rubinius {
         values[i] = tmp;
         break;
       }
+      case RBX_FFI_TYPE_STRUCT: {
+        obj = args.get_argument(i);
+        if(obj->nil_p()){
+          void** tmp = ALLOCA(void*);
+          *tmp = NULL;
+          values[i] =  tmp;  
+        } else if(obj->kind_of_p(state, ffi_data->args_info[i].struct_type_obj)){
+          void** tmp = ALLOCA(void*);
+          obj = obj->send(state, call_frame, state->symbol("to_ptr"));
+          Pointer* ptr = try_as<Pointer>(obj);
+          *tmp = ptr ->pointer;
+          values[i] =  tmp;
+        } else {
+          Class* c = try_as<Class>(ffi_data->args_info[i].struct_type_obj);
+          Exception* exc = Exception::make_type_error(state, c->type, obj, "Invalid type for ffi");
+          exc->locations(state, Location::from_call_stack(state, call_frame));
+          state->raise_exception(exc);
+
+          return NULL;
+        }
+        break;
+      }
+      case RBX_FFI_TYPE_STRUCT_VALUE: {
+        obj = args.get_argument(i);
+        if(obj->kind_of_p(state, ffi_data->args_info[i].struct_type_obj)){
+          obj = obj->send(state, call_frame, state->symbol("to_ptr"));
+          Pointer* ptr = try_as<Pointer>(obj);
+          values[i] =  ptr->pointer;;
+        } else {
+          Class* c = try_as<Class>(ffi_data->args_info[i].struct_type_obj);
+          Exception* exc = Exception::make_type_error(state, c->type, obj, "Invalid type for ffi");
+          exc->locations(state, Location::from_call_stack(state, call_frame));
+          state->raise_exception(exc);
+
+          return NULL;
+        }
+        break;
+      }
       case RBX_FFI_TYPE_STRING: {
         char** tmp = ALLOCA(char*);
         obj = args.get_argument(i);
@@ -1106,6 +1306,34 @@ namespace rubinius {
       state->gc_dependent();
       break;
     }
+    case RBX_FFI_TYPE_STRUCT: {
+      void* result;
+      ffi_call(&ffi_data_local->cif, FFI_FN(ffi_data_local->ep), &result, values);
+      state->gc_dependent();
+      if(result == NULL) {
+        ret = cNil;
+      } else {
+        Object *raw = Pointer::create(state, result);
+        Array *args = Array::create(state, 1);
+        args->set(state, 0, raw);
+        ret = ffi_data_local->ret_info.struct_type_obj->send(state,call_frame, state->symbol("new"), args);
+      }
+      break;
+    }
+    case RBX_FFI_TYPE_STRUCT_VALUE: {
+      Pointer* buffer = Pointer::allocate_memory(state, 
+                                                 G(ffi_pointer), 
+                                                 Fixnum::from(ffi_data_local->cif.rtype->size));
+      buffer->set_autorelease(state, cTrue);
+      ffi_call(&ffi_data_local->cif, FFI_FN(ffi_data_local->ep), buffer->pointer, values);
+
+      state->gc_dependent();
+      Array *args = Array::create(state, 1);
+      args->set(state, 0, buffer);
+      ret = ffi_data_local->ret_info.struct_type_obj->send(state,call_frame, state->symbol("new"), args);
+
+      break;
+    }
     case RBX_FFI_TYPE_PTR: {
       void* result;
       ffi_call(&ffi_data_local->cif, FFI_FN(ffi_data_local->ep), &result, values);
@@ -1230,6 +1458,13 @@ namespace rubinius {
             mark.just_set(obj, tmp);
           }
         }
+        if(arg->struct_type_obj) {
+          Object* tmp = mark.call(arg->struct_type_obj);
+          if(tmp) {
+            arg->struct_type_obj = tmp;
+            mark.just_set(obj, tmp);
+          }
+        }
       }
       FFIArgInfo* arg = &func->ffi_data->ret_info;
       if(arg->callback) {
@@ -1239,10 +1474,10 @@ namespace rubinius {
           mark.just_set(obj, tmp);
         }
       }
-      if(arg->enum_obj) {
-        Object* tmp = mark.call(arg->enum_obj);
+      if(arg->struct_type_obj) {
+        Object* tmp = mark.call(arg->struct_type_obj);
         if(tmp) {
-          arg->enum_obj = tmp;
+          arg->struct_type_obj = tmp;
           mark.just_set(obj, tmp);
         }
       }
